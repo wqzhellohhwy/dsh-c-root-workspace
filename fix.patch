@@ -1,0 +1,83 @@
+diff --git a/packages/host/apiproxy/src/api-proxy.ts b/packages/host/apiproxy/src/api-proxy.ts
+index bda9936..aa058c0 100644
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -1664,7 +1664,18 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+         try {
+           await mkdir(cwd, { recursive: true })
+         } catch (error: unknown) {
+-          throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
++          // Windows rejects mkdir of an existing filesystem root ('C:\') with
++          // EPERM even under recursive:true; an existing directory already
++          // satisfies the ensure contract, so probe on failure.
++          let satisfied = false
++          try {
++            satisfied = (await stat(cwd)).isDirectory()
++          } catch {
++            // The probe itself failed; the original mkdir error stands.
++          }
++          if (!satisfied) {
++            throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
++          }
+         }
+         const composition = await composeAgent(presetId)
+         return (await ctx.agents.create({
+diff --git a/packages/workspace/workspace/src/index.ts b/packages/workspace/workspace/src/index.ts
+index 87edb28..7106c42 100644
+--- a/packages/workspace/workspace/src/index.ts
++++ b/packages/workspace/workspace/src/index.ts
+@@ -287,7 +287,9 @@ export class WorkspaceRegistry extends Service {
+       if (entity.path === canonical) return entity
+     }
+ 
+-    const workspaceName = title ?? basename(canonical)
++    // A filesystem root (e.g. 'C:\' or '/') has an empty basename; fall
++    // back to the canonical path so the workspace keeps a displayable title.
++    const workspaceName = title ?? (basename(canonical) || canonical)
+     const table = this.requireTable()
+     const state = this.requireState()
+     const id = WorkspaceId(randomUUID())
+@@ -459,7 +461,8 @@ export class WorkspaceRegistry extends Service {
+         const createdAt = new Date(group.newestAt).toISOString()
+         const record: WorkspaceRecord = {
+           path: group.path,
+-          title: basename(group.path),
++          // A filesystem root has an empty basename; fall back to the path.
++          title: basename(group.path) || group.path,
+           sessionIds,
+           createdAt,
+           updatedAt: createdAt,
+diff --git a/packages/workspace/workspace/src/types.ts b/packages/workspace/workspace/src/types.ts
+index 555e94d..bed2ef6 100644
+--- a/packages/workspace/workspace/src/types.ts
++++ b/packages/workspace/workspace/src/types.ts
+@@ -31,7 +31,7 @@ export interface Workspace {
+    */
+   readonly path: string
+ 
+-  /** Display title. Defaults to `basename(path)` at create; duplicates are allowed. */
++  /** Display title. Defaults to `basename(path)` at create — or the full path when the basename is empty (a filesystem root); duplicates are allowed. */
+   readonly title: string
+ 
+   /** ISO-8601 creation instant, stamped at create and never rewritten. */
+diff --git a/packages/workspace/workspace/tests/workspace.spec.ts b/packages/workspace/workspace/tests/workspace.spec.ts
+index 22900c7..df1d77c 100644
+--- a/packages/workspace/workspace/tests/workspace.spec.ts
++++ b/packages/workspace/workspace/tests/workspace.spec.ts
+@@ -392,6 +392,16 @@ describe('WorkspaceRegistry create and lookup', () => {
+     expect(registry.list()).toEqual([second, first])
+   })
+ 
++  it('falls back to the canonical path as the title when the basename is empty (a filesystem root)', async () => {
++    // '/' is a root directory on every platform: the filesystem root on
++    // POSIX, the current drive root on Windows. Both spellings have an
++    // empty basename, so the title must fall back to the canonical path
++    // instead of storing an empty display label.
++    const { registry } = await harness()
++    const workspace = await registry.create('/')
++    expect(workspace.title).toBe(workspace.path)
++  })
++
+   it('rejects nonexistent and non-directory paths without changing order', async () => {
+     const parent = await makeDir('invalid')
+     const file = join(parent, 'plain.txt')
