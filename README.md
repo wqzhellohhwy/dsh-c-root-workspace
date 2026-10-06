@@ -2,6 +2,17 @@
 
 DeepSeek Harness（DSH）**C 盘根目录作为工作区**修复方案。解决 Windows 上无法以 `C:\` 为工作区创建/选中会话的两个根因（空标题 + `mkdir` EPERM），附带单元测试与一键补丁。
 
+修复分**两个层次**，按你的 DSH 是"源码运行"还是"安装版"选用：
+
+| 层次 | 对象 | 材料 |
+|---|---|---|
+| **源码层** | 从仓库源码运行（`pnpm dsh web`） | [`fix.patch`](fix.patch) + 单元测试（本文档） |
+| **产物层** | 安装版：DSH Desktop 的 `app.asar`、npm 全局 CLI、`C:\dsh-runtime\*` | [`dist-fix.md`](dist-fix.md) + [`tools/`](tools/)（2026-10-07 新增） |
+
+> 2026-10-07 复核：上游已自行修好"根目录标题为空"那一半（`basename(path) || path.parse(path).root`），
+> 但 **`mkdir` EPERM 那一半至今未修** —— 未修改的官方发行版同样无法在 `C:\` 里**新建**会话
+> （打开已有会话不受影响）。详见 [dist-fix.md](dist-fix.md)。
+
 ## 项目背景
 
 DSH 的 Web UI 支持选择任意目录作为工作区，但选择 `C:\`（文件系统根目录）时出现两个问题：
@@ -18,6 +29,22 @@ DSH 的 Web UI 支持选择任意目录作为工作区，但选择 `C:\`（文�
 - **根目录标题回退**：`WorkspaceRegistry` 两处 `basename` 用法增加空值回退——当 `basename` 为空（文件系统根目录）时改用完整规范路径作为显示标题，保证工作区始终有可显示的标签。
 - **根目录 mkdir EPERM 兼容**：`ensureSession` 的 `mkdir(cwd, { recursive: true })` 失败时先探测目录是否已存在（`stat().isDirectory()`），已存在则视为满足"确保项目目录"契约，不再抛错中断会话创建。
 - **单元测试覆盖**：新增 `workspace.spec.ts` 根目录标题回退测试；新增 `api-proxy-root-dir.spec.ts` 用 mock 强制 `mkdir` 抛 EPERM，证明 stat 探测回退（而非 mkdir 本身）满足了契约，且目录不存在时仍会响亮失败。
+
+## 已构建产物（安装版）的修复
+
+源码补丁**不会**随发行版走：Desktop 把主程序打包在 `resources/app.asar`，CLI 在各自的
+`node_modules/@deepseek-ai/dsh*` 里。要让安装版也能在 `C:\` 新建会话，必须直接补编译产物。
+
+```bash
+# DSH Desktop（Electron）：补 app.asar，默认 dry-run
+node tools/patch-asar.mjs --asar "<...>\resources\app.asar" --apply
+
+# npm 全局 CLI 或 C:\dsh-runtime\<ver> 这类独立安装
+node tools/patch-package.mjs --anchor "<dsh 安装根>" --apply
+```
+
+两个脚本都自包含（无需依赖，Node ≥ 22），都会先备份、改完逐条校验，并可重复执行（幂等）。
+完整原理、判定表与验证记录见 **[dist-fix.md](dist-fix.md)**。
 
 ## 技术栈
 
@@ -82,7 +109,11 @@ pnpm vitest run packages/host/apiproxy/tests/api-proxy-root-dir.spec.ts
 ```
 dsh-c-root-workspace/
 ├── README.md          # 本文档
-├── fix.patch          # 完整补丁（git apply 一键应用，4 文件修改 + 1 新增测试）
+├── fix.patch          # 源码层补丁（git apply 一键应用，4 文件修改 + 1 新增测试）
+├── dist-fix.md        # 产物层说明：为什么需要、上游现状复核、判定表、验证记录
+├── tools/
+│   ├── patch-asar.mjs     # 补 Electron app.asar（等长替换 + integrity 重算 + 逐条校验）
+│   └── patch-package.mjs  # 补普通 npm 安装目录里的 dsh-api-session-controller
 └── tests/
     └── api-proxy-root-dir.spec.ts   # 新增测试文件副本
 ```
@@ -104,6 +135,7 @@ A：适用。修复按 basename 为空/根目录 EPERM 通用语义处理，不�
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 0.2.0 | 2026-10-07 | **产物层修复**：新增 `dist-fix.md` 与 `tools/patch-asar.mjs`、`tools/patch-package.mjs`，覆盖 Desktop `app.asar` 与 npm 安装目录。复核确认上游只修好了标题回退、`mkdir` EPERM 仍未修 |
 | 0.1.0 | 2026-08-14 | 初始修复：根目录标题回退 + mkdir EPERM 兼容 + 测试 |
 
 ## 许可证
